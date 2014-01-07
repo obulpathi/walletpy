@@ -1,188 +1,82 @@
-#!/usr/bin/env python
-# Joric/bitcoin-dev, june 2012, public domain
-
 import hashlib
-import ctypes
-import ctypes.util
-import sys
+from bitcoin.key import CKey as Key
+from bitcoin.base58 import encode, decode
 
-ssl = ctypes.cdll.LoadLibrary (ctypes.util.find_library ('ssl') or 'libeay32')
+# validate: https://en.bitcoin.it/wiki/Technical_background_of_Bitcoin_addresses
 
-def check_result (val, func, args):
-    if val == 0: raise ValueError 
-    else: return ctypes.c_void_p (val)
-
-ssl.EC_KEY_new_by_curve_name.restype = ctypes.c_void_p
-ssl.EC_KEY_new_by_curve_name.errcheck = check_result
-
-class KEY:
-    def __init__(self):
-        NID_secp256k1 = 714
-        self.k = ssl.EC_KEY_new_by_curve_name(NID_secp256k1)
-        self.compressed = False
-        self.POINT_CONVERSION_COMPRESSED = 2
-        self.POINT_CONVERSION_UNCOMPRESSED = 4
-
-    def __del__(self):
-        if ssl:
-            ssl.EC_KEY_free(self.k)
-        self.k = None
-
-    def generate(self, secret=None):
-        if secret:
-            self.prikey = secret
-            priv_key = ssl.BN_bin2bn(secret, 32, ssl.BN_new())
-            group = ssl.EC_KEY_get0_group(self.k)
-            pub_key = ssl.EC_POINT_new(group)
-            ctx = ssl.BN_CTX_new()
-            ssl.EC_POINT_mul(group, pub_key, priv_key, None, None, ctx)
-            ssl.EC_KEY_set_private_key(self.k, priv_key)
-            ssl.EC_KEY_set_public_key(self.k, pub_key)
-            ssl.EC_POINT_free(pub_key)
-            ssl.BN_CTX_free(ctx)
-            return self.k
-        else:
-            return ssl.EC_KEY_generate_key(self.k)
-
-    def get_pubkey(self):
-        size = ssl.i2o_ECPublicKey(self.k, 0)
-        mb = ctypes.create_string_buffer(size)
-        ssl.i2o_ECPublicKey(self.k, ctypes.byref(ctypes.pointer(mb)))
-        return mb.raw
-
-    def get_secret(self):
-        bn = ssl.EC_KEY_get0_private_key(self.k);
-        bytes = (ssl.BN_num_bits(bn) + 7) / 8
-        mb = ctypes.create_string_buffer(bytes)
-        n = ssl.BN_bn2bin(bn, mb);
-        return mb.raw.rjust(32, chr(0))
-
-    def set_compressed(self, compressed):
-        self.compressed = compressed
-        if compressed:
-            form = self.POINT_CONVERSION_COMPRESSED
-        else:
-            form = self.POINT_CONVERSION_UNCOMPRESSED
-        ssl.EC_KEY_set_conv_form(self.k, form)
-
-def dhash(s):
+def MyHash(s):
     return hashlib.sha256(hashlib.sha256(s).digest()).digest()
 
-def rhash(s):
-    h1 = hashlib.new('ripemd160')
-    h1.update(hashlib.sha256(s).digest())
-    return h1.digest()
+def MyHash160(s):
+    h = hashlib.new('ripemd160')
+    h.update(hashlib.sha256(s).digest())
+    return h.digest()
+    
+# Generate public and private keys
+key = Key()
+key.generate()
+key.set_compressed(True)
+private_key = key.get_privkey()
+public_key = key.get_pubkey()
+private_key_hex = private_key.encode('hex')
+public_key_hex = public_key.encode('hex')
+# print "Private key: ", private_key
+# print "Public key: ", public_key
 
-b58_digits = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+public_key = bytearray.fromhex(public_key_hex)
+# public_key = bytearray.fromhex("0450863AD64A87AE8A2FE83C1AF1A8403CB53F53E486D8511DAD8A04887E5B23522CD470243453A299FA9E77237716103ABC11A1DF38855ED6F2EE187E9C582BA6")
 
-def base58_encode(n):
-    l = []
-    while n > 0:
-        n, r = divmod(n, 58)
-        l.insert(0,(b58_digits[r]))
-    return ''.join(l)
+# Perform SHA-256 and RIPEMD-160 hashing on public key
+hash160_address = MyHash160(public_key)
 
-def base58_decode(s):
-    n = 0
-    for ch in s:
-        n *= 58
-        digit = b58_digits.index(ch)
-        n += digit
-    return n
+# add version byte: 0x00 for Main Network
+extended_address = '\x00' + hash160_address
 
-def base58_encode_padded(s):
-    res = base58_encode(int('0x' + s.encode('hex'), 16))
-    pad = 0
-    for c in s:
-        if c == chr(0):
-            pad += 1
-        else:
-            break
-    return b58_digits[0] * pad + res
+# generate double SHA-256 hash of extended address
+hash_address = MyHash(extended_address)
 
-def base58_decode_padded(s):
-    pad = 0
-    for c in s:
-        if c == b58_digits[0]:
-            pad += 1
-        else:
-            break
-    h = '%x' % base58_decode(s)
-    if len(h) % 2:
-        h = '0' + h
-    res = h.decode('hex')
-    return chr(0) * pad + res
+# Take the first 4 bytes of the second SHA-256 hash. This is the address checksum
+checksum = hash_address[:4]
 
-def base58_check_encode(s, version=0):
-    vs = chr(version) + s
-    check = dhash(vs)[:4]
-    return base58_encode_padded(vs + check)
+# Add the 4 checksum bytes from point 7 at the end of extended RIPEMD-160 hash from point 4. This is the 25-byte binary Bitcoin Address.
+binary_address = extended_address + checksum
 
-def base58_check_decode(s, version=0):
-    k = base58_decode_padded(s)
-    v0, data, check0 = k[0], k[1:-4], k[-4:]
-    check1 = dhash(v0 + data)[:4]
-    if check0 != check1:
-        raise BaseException('checksum error')
-    if version != ord(v0):
-        raise BaseException('version mismatch')
-    return data
+# Convert the result from a byte string into a base58 string using Base58Check encoding.
+address = encode(binary_address)
+print address
 
-def gen_eckey(passphrase=None, secret=None, pkey=None, compressed=False, rounds=1, version=0):
-    k = KEY()
-    if passphrase:
-        secret = passphrase.encode('utf8')
-        for i in xrange(rounds):
-            secret = hashlib.sha256(secret).digest()
-    if pkey:
-        secret = base58_check_decode(pkey, 128+version)
-        compressed = len(secret) == 33
-        secret = secret[0:32]
-    k.generate(secret)
-    k.set_compressed(compressed)
-    return k
 
-def get_addr(k,version=0):
-    pubkey = k.get_pubkey()
-    secret = k.get_secret()
-    hash160 = rhash(pubkey)
-    addr = base58_check_encode(hash160,version)
-    payload = secret
-    if k.compressed:
-        payload = secret + chr(1)
-    pkey = base58_check_encode(payload, 128+version)
-    return addr, pkey
+"""
+How to create Bitcoin Address
 
-def reencode(pkey,version=0):
-    payload = base58_check_decode(pkey,128+version)
-    secret = payload[:-1]
-    payload = secret + chr(1)
-    pkey = base58_check_encode(payload, 128+version)
-    print get_addr(gen_eckey(pkey))
+0 - Having a private ECDSA key
 
-def test(otherversion):
-    # random compressed
-    print get_addr(gen_eckey(compressed=True,version=otherversion),version=otherversion)
+   18E14A7B6A307F426A94F8114701E7C8E774E7F9A47E2C2035DB29A206321725
+1 - Take the corresponding public key generated with it (65 bytes, 1 byte 0x04, 32 bytes corresponding to X coordinate, 32 bytes corresponding to Y coordinate)
 
-    # uncomment these to create addresses via a different method
-    # random uncompressed
-    #print get_addr(gen_eckey())
-    # by secret
-    #print get_addr(gen_eckey(secret=('%064x' % 0xdeadbabe).decode('hex')))
-    # by passphrase
-    #print get_addr(gen_eckey(passphrase='Satoshi Nakamoto'))
-    # by private key
-    #print get_addr(gen_eckey(pkey='5K1HkbYffstTZDuV4riUWMbAMkQh57b8798uoy9pXYUDYeUHe7F'))
-    #print get_addr(gen_eckey(pkey='L3ATL5R9Exe1ubuAnHVgNgTKZEUKkDvWYAWkLUCyyvzzxRjtgyFe'))
+   0450863AD64A87AE8A2FE83C1AF1A8403CB53F53E486D8511DAD8A04887E5B23522CD470243453A299FA9E77237716103ABC11A1DF38855ED6F2EE187E9C582BA6
+2 - Perform SHA-256 hashing on the public key
 
-    # uncomment this to reencode the private keys created by early versions of this script
-    #reencode(sys.argv[1])
+   600FFE422B4E00731A59557A5CCA46CC183944191006324A447BDB2D98D4B408
+3 - Perform RIPEMD-160 hashing on the result of SHA-256
 
-if __name__ == '__main__':
-    import optparse
-    parser = optparse.OptionParser(usage="%prog [options]")
-    parser.add_option("--otherversion", dest="otherversion", default=0,
-                    help="Generate address with different version number")
-    (options, args) = parser.parse_args()
- 
-    test(int(options.otherversion))
+   010966776006953D5567439E5E39F86A0D273BEE
+4 - Add version byte in front of RIPEMD-160 hash (0x00 for Main Network)
+
+   00010966776006953D5567439E5E39F86A0D273BEE
+5 - Perform SHA-256 hash on the extended RIPEMD-160 result
+
+   445C7A8007A93D8733188288BB320A8FE2DEBD2AE1B47F0F50BC10BAE845C094
+6 - Perform SHA-256 hash on the result of the previous SHA-256 hash
+
+   D61967F63C7DD183914A4AE452C9F6AD5D462CE3D277798075B107615C1A8A30
+7 - Take the first 4 bytes of the second SHA-256 hash. This is the address checksum
+
+   D61967F6
+8 - Add the 4 checksum bytes from point 7 at the end of extended RIPEMD-160 hash from point 4. This is the 25-byte binary Bitcoin Address.
+
+   00010966776006953D5567439E5E39F86A0D273BEED61967F6
+9 - Convert the result from a byte string into a base58 string using Base58Check encoding. This is the most commonly used Bitcoin Address format
+
+   16UwLL9Risc3QfPqBUvKofHmBQ7wMtjvM
+"""
