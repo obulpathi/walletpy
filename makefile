@@ -4,6 +4,8 @@ account:
 	python account.py
 balance:
 	python balance.py
+received:
+	python received.py
 send:
 	python send.py
 info:
