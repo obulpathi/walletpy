@@ -1,5 +1,7 @@
 address:
 	python newaddress.py
+account:
+	python account.py
 balance:
 	python balance.py
 send:
