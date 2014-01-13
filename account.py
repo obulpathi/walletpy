@@ -7,4 +7,5 @@ account = "account"
 
 connection = bitcoinrpc.connect_to_remote(rpcuser, rpcpass, host='localhost', port=9333, use_https=False)
 addressmap = connection.getaccount(account)
-print addressmap
+for account in addressmap:
+    print account['address'], account['public_key'], account['private_key'], account['balance']
